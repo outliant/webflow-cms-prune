@@ -1,0 +1,30 @@
+{
+  "name": "webflow-cms-prune",
+  "version": "1.0.0",
+  "description": "A safe, reusable CLI for pruning Webflow CMS locale variants — dry-run by default, pre-delete backups, and an audit log.",
+  "type": "module",
+  "bin": {
+    "webflow-cms": "./webflow-cms.js"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "scripts": {
+    "start": "node --env-file=.env webflow-cms.js",
+    "help": "node webflow-cms.js --help",
+    "test": "node webflow-cms.js --help > /dev/null && echo 'smoke ok'"
+  },
+  "keywords": [
+    "webflow",
+    "cms",
+    "localization",
+    "locales",
+    "cli"
+  ],
+  "author": "ksiam107 <ksiam107@gmail.com>",
+  "license": "MIT",
+  "private": false,
+  "dependencies": {
+    "@clack/prompts": "^1.7.0"
+  }
+}
