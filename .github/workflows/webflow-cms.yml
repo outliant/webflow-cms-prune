@@ -1,0 +1,119 @@
+# Manually-triggered Webflow CMS runner.
+#
+# How it works:
+#   • Trigger from the Actions tab (Run workflow) — pick a command + args.
+#   • The `plan` job always runs first and, for `delete`, prints the DRY-RUN plan.
+#   • For a live delete (command=delete + live=true) the `apply` job runs, but only
+#     after manual approval via the `webflow-prod` environment.
+#
+# One-time setup in repo Settings:
+#   1. Secrets → Actions → new secret `WEBFLOW_TOKEN` (CMS:write for delete; a
+#      CMS:read token is enough if you only ever run status/locales/collections).
+#   2. Environments → create `webflow-prod` → add Required reviewers. That reviewer
+#      gate IS the "approval before we delete" — they see the plan, then approve.
+#      (Optionally attach a separate write-scoped WEBFLOW_TOKEN as an environment
+#      secret so the read-only path never sees the write token.)
+
+name: Webflow CMS
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: What to run
+        type: choice
+        default: status
+        options: [status, locales, collections, items, delete]
+      collection:
+        description: Collection name or id (items / status / delete)
+        type: string
+      items:
+        description: Item name substrings and/or ids, comma-separated
+        type: string
+      keep:
+        description: "delete: locale tags to KEEP (comma-separated)"
+        type: string
+      locales:
+        description: "delete: locale tags to delete explicitly (comma-separated)"
+        type: string
+      live:
+        description: "delete: actually delete (unchecked = dry-run only)"
+        type: boolean
+        default: false
+
+# Never let two runs mutate the CMS at the same time.
+concurrency:
+  group: webflow-cms
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan (dry-run)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      WEBFLOW_TOKEN: ${{ secrets.WEBFLOW_TOKEN }}
+      # Inputs are passed via env (not interpolated into the script) to avoid
+      # shell-injection from free-text fields.
+      CMD: ${{ inputs.command }}
+      COLLECTION: ${{ inputs.collection }}
+      ITEMS: ${{ inputs.items }}
+      KEEP: ${{ inputs.keep }}
+      LOCALES: ${{ inputs.locales }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - name: Run (delete is dry-run here)
+        run: |
+          set -euo pipefail
+          args=("$CMD")
+          [ -n "$COLLECTION" ] && args+=(--collection "$COLLECTION") || true
+          [ -n "$ITEMS" ]      && args+=(--items "$ITEMS")           || true
+          [ -n "$KEEP" ]       && args+=(--keep "$KEEP")             || true
+          [ -n "$LOCALES" ]    && args+=(--locales "$LOCALES")       || true
+          echo "› webflow-cms ${args[*]}"
+          node webflow-cms.js "${args[@]}"
+
+  apply:
+    name: Apply (live delete — needs approval)
+    needs: plan
+    if: ${{ inputs.command == 'delete' && inputs.live }}
+    runs-on: ubuntu-latest
+    environment: webflow-prod # required reviewers here = the approval gate
+    permissions:
+      contents: read
+    env:
+      WEBFLOW_TOKEN: ${{ secrets.WEBFLOW_TOKEN }}
+      COLLECTION: ${{ inputs.collection }}
+      ITEMS: ${{ inputs.items }}
+      KEEP: ${{ inputs.keep }}
+      LOCALES: ${{ inputs.locales }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - name: Delete (live)
+        run: |
+          set -euo pipefail
+          args=(delete --live --yes)
+          [ -n "$COLLECTION" ] && args+=(--collection "$COLLECTION") || true
+          [ -n "$ITEMS" ]      && args+=(--items "$ITEMS")           || true
+          [ -n "$KEEP" ]       && args+=(--keep "$KEEP")             || true
+          [ -n "$LOCALES" ]    && args+=(--locales "$LOCALES")       || true
+          node webflow-cms.js "${args[@]}"
+      - name: Upload backups + audit log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webflow-cms-run-${{ github.run_id }}
+          path: |
+            backups/
+            logs/
+          if-no-files-found: ignore
+          retention-days: 90
