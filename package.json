@@ -21,7 +21,7 @@
     "locales",
     "cli"
   ],
-  "author": "ksiam107 <ksiam107@gmail.com>",
+  "author": "Siam Khan <siam.khan@ignitevisibility.com>",
   "license": "UNLICENSED",
   "private": false,
   "dependencies": {
