@@ -174,7 +174,3 @@ Every live operation appends a line to `logs/audit.jsonl`:
 2. `delete ... -k <keep>` — read the dry-run plan carefully.
 3. `delete ... -k <keep> --live` — confirm, back up, delete.
 4. `status ...` again to verify, then **publish in the Designer**.
-
-## License
-
-[MIT](LICENSE)

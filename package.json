@@ -22,7 +22,7 @@
     "cli"
   ],
   "author": "ksiam107 <ksiam107@gmail.com>",
-  "license": "MIT",
+  "license": "UNLICENSED",
   "private": false,
   "dependencies": {
     "@clack/prompts": "^1.7.0"
