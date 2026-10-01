@@ -17,6 +17,7 @@ on:
       site:
         description: "Webflow site name substring or ID"
         required: true
+        default: 66aa8fe9dc4db68f448a978f
         type: string
 
       collection:
