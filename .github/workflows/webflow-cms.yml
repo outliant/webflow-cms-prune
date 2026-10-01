@@ -1,117 +1,307 @@
-# Manually-triggered Webflow CMS runner.
-#
-# How it works:
-#   • Trigger from the Actions tab (Run workflow) — pick a command + args.
-#   • The `plan` job always runs first and, for `delete`, prints the DRY-RUN plan.
-#   • For a live delete (command=delete + live=true) the `apply` job runs, but only
-#     after manual approval via the `webflow-prod` environment.
-#
-# One-time setup in repo Settings:
-#   1. Secrets → Actions → new secret `WEBFLOW_TOKEN` (CMS:write for delete; a
-#      CMS:read token is enough if you only ever run status/locales/collections).
-#   2. Environments → create `webflow-prod` → add Required reviewers. That reviewer
-#      gate IS the "approval before we delete" — they see the plan, then approve.
-#      (Optionally attach a separate write-scoped WEBFLOW_TOKEN as an environment
-#      secret so the read-only path never sees the write token.)
-
-name: Webflow CMS
+name: Webflow CMS CLI
 
 on:
   workflow_dispatch:
     inputs:
-      command:
-        description: What to run
+      action:
+        description: CLI command
+        required: true
         type: choice
-        default: status
-        options: [status, locales, collections, items, delete]
+        options:
+          - locales
+          - collections
+          - items
+          - status
+          - delete
+
+      site:
+        description: "Webflow site name substring or ID"
+        required: true
+        type: string
+
       collection:
-        description: Collection name or id (items / status / delete)
+        description: Collection name substring or ID
+        required: false
         type: string
+
       items:
-        description: Item name substrings and/or ids, comma-separated
+        description: Comma-separated item names substrings or IDs
+        required: false
         type: string
-      keep:
-        description: "delete: locale tags to KEEP (comma-separated)"
+
+      locale_mode:
+        description: "For delete: keep these locales or delete them explicitly"
+        required: false
+        type: choice
+        default: none
+        options:
+          - none
+          - keep
+          - delete-explicitly
+
+      locale_tags:
+        description: "For delete: comma-separated locale tags"
+        required: false
         type: string
-      locales:
-        description: "delete: locale tags to delete explicitly (comma-separated)"
-        type: string
+
       live:
-        description: "delete: actually delete (unchecked = dry-run only)"
+        description: "For delete: after preview and approval, perform the deletion"
+        required: false
         type: boolean
         default: false
 
-# Never let two runs mutate the CMS at the same time.
-concurrency:
-  group: webflow-cms
-  cancel-in-progress: false
+      json:
+        description: "Use machine-readable output"
+        required: false
+        type: boolean
+        default: false
+
+      confirmation:
+        description: "For a live deletion, type DELETE"
+        required: false
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
-  plan:
-    name: Plan (dry-run)
+  validate:
+    name: Validate Inputs
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     env:
-      WEBFLOW_TOKEN: ${{ secrets.WEBFLOW_TOKEN }}
-      # Inputs are passed via env (not interpolated into the script) to avoid
-      # shell-injection from free-text fields.
-      CMD: ${{ inputs.command }}
+      ACTION: ${{ inputs.action }}
       COLLECTION: ${{ inputs.collection }}
       ITEMS: ${{ inputs.items }}
-      KEEP: ${{ inputs.keep }}
-      LOCALES: ${{ inputs.locales }}
+      LOCALE_MODE: ${{ inputs.locale_mode }}
+      LOCALE_TAGS: ${{ inputs.locale_tags }}
+      LIVE: ${{ inputs.live }}
+      JSON_OUTPUT: ${{ inputs.json }}
+      CONFIRMATION: ${{ inputs.confirmation }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - run: npm ci
-      - name: Run (delete is dry-run here)
+      - name: Validate
         run: |
-          set -euo pipefail
-          args=("$CMD")
-          [ -n "$COLLECTION" ] && args+=(--collection "$COLLECTION") || true
-          [ -n "$ITEMS" ]      && args+=(--items "$ITEMS")           || true
-          [ -n "$KEEP" ]       && args+=(--keep "$KEEP")             || true
-          [ -n "$LOCALES" ]    && args+=(--locales "$LOCALES")       || true
-          echo "› webflow-cms ${args[*]}"
-          node webflow-cms.js "${args[@]}"
+          if [[ "$ACTION" != "delete" ]]; then
+            if [[ "$LOCALE_MODE" != "none" || -n "$LOCALE_TAGS" || "$LIVE" == "true" || -n "$CONFIRMATION" ]]; then
+              echo "::error::locale_mode, locale_tags, live and confirmation are only valid for delete."
+              exit 2
+            fi
+          fi
 
-  apply:
-    name: Apply (live delete — needs approval)
-    needs: plan
-    if: ${{ inputs.command == 'delete' && inputs.live }}
+          if [[ "$LIVE" != "true" && -n "$CONFIRMATION" ]]; then
+            echo "::error::Confirmation is set but live is unchecked. Tick live for a real deletion, or clear confirmation for a dry-run."
+            exit 2
+          fi
+
+          case "$ACTION" in
+            items)
+              if [[ -z "$COLLECTION" ]]; then
+                echo "::error::Collection is required for items."
+                exit 2
+              fi
+              ;;
+
+            status)
+              if [[ -z "$COLLECTION" || -z "$ITEMS" ]]; then
+                echo "::error::Collection and items are required for status."
+                exit 2
+              fi
+              ;;
+
+            delete)
+              if [[ -z "$COLLECTION" || -z "$ITEMS" || "$LOCALE_MODE" == "none" || -z "$LOCALE_TAGS" ]]; then
+                echo "::error::Collection, items, locale mode and locale tags are required."
+                exit 2
+              fi
+
+              if [[ "$JSON_OUTPUT" == "true" ]]; then
+                echo "::error::JSON output is not supported for delete."
+                exit 2
+              fi
+
+              if [[ "$LIVE" == "true" && "$CONFIRMATION" != "DELETE" ]]; then
+                echo "::error::Type DELETE in the confirmation input."
+                exit 2
+              fi
+              ;;
+          esac
+
+  read_command:
+    name: Run ${{ inputs.action }}
+    needs: validate
     runs-on: ubuntu-latest
-    environment: webflow-prod # required reviewers here = the approval gate
-    permissions:
-      contents: read
-    env:
-      WEBFLOW_TOKEN: ${{ secrets.WEBFLOW_TOKEN }}
-      COLLECTION: ${{ inputs.collection }}
-      ITEMS: ${{ inputs.items }}
-      KEEP: ${{ inputs.keep }}
-      LOCALES: ${{ inputs.locales }}
+    timeout-minutes: 30
+    if: ${{ inputs.action != 'delete' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup NodeJS
+        uses: actions/setup-node@v6
         with:
-          node-version: "20"
-      - run: npm ci
-      - name: Delete (live)
+          node-version: '22'
+
+      - name: Run command
+        env:
+          WEBFLOW_TOKEN: ${{ secrets.WEBFLOW_TOKEN }}
+          ACTION: ${{ inputs.action }}
+          SITE: ${{ inputs.site }}
+          COLLECTION: ${{ inputs.collection }}
+          ITEMS: ${{ inputs.items }}
+          JSON_OUTPUT: ${{ inputs.json }}
         run: |
-          set -euo pipefail
-          args=(delete --live --yes)
-          [ -n "$COLLECTION" ] && args+=(--collection "$COLLECTION") || true
-          [ -n "$ITEMS" ]      && args+=(--items "$ITEMS")           || true
-          [ -n "$KEEP" ]       && args+=(--keep "$KEEP")             || true
-          [ -n "$LOCALES" ]    && args+=(--locales "$LOCALES")       || true
-          node webflow-cms.js "${args[@]}"
-      - name: Upload backups + audit log
-        if: always()
-        uses: actions/upload-artifact@v4
+          cmd=(
+            node webflow-cms.js
+            "$ACTION"
+            --site "$SITE"
+          )
+
+          case "$ACTION" in
+            items)
+              cmd+=(--collection "$COLLECTION")
+
+              if [[ -n "$ITEMS" ]]; then
+                cmd+=(--items "$ITEMS")
+              fi
+              ;;
+            
+            status)
+              cmd+=(--collection "$COLLECTION" --items "$ITEMS")
+              ;;
+          esac
+
+          if [[ "$JSON_OUTPUT" == "true" ]]; then
+            cmd+=(--json)
+          fi
+
+          printf 'Running:'
+          printf ' %q' "${cmd[@]}"
+          printf '\n'
+
+          "${cmd[@]}"
+
+  delete_preview:
+    name: Preview Deletion
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: ${{ inputs.action == 'delete' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup NodeJS
+        uses: actions/setup-node@v6
         with:
-          name: webflow-cms-run-${{ github.run_id }}
+          node-version: '22'
+
+      - name: Generate dry-run plan
+        env:
+          WEBFLOW_TOKEN: ${{ secrets.WEBFLOW_TOKEN }}
+          SITE: ${{ inputs.site }}
+          COLLECTION: ${{ inputs.collection }}
+          ITEMS: ${{ inputs.items }}
+          LOCALE_MODE: ${{ inputs.locale_mode }}
+          LOCALE_TAGS: ${{ inputs.locale_tags }}
+        run: |
+          set -o pipefail
+
+          cmd=(
+            node webflow-cms.js
+            delete
+            --site "$SITE"
+            --collection "$COLLECTION"
+            --items "$ITEMS"
+          )
+
+          if [[ "$LOCALE_MODE" == "keep" ]]; then
+            cmd+=(--keep "$LOCALE_TAGS")
+          else
+            cmd+=(--locales "$LOCALE_TAGS")
+          fi
+
+          printf 'Dry-run command:'
+          printf ' %q' "${cmd[@]}"
+          printf '\n'
+
+          "${cmd[@]}" | tee dry-run-plan.txt
+      
+      - name: Upload dry-run plan
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: webflow-cms-dry-run-plan-${{ github.run_id }}
+          path: dry-run-plan.txt
+          retention-days: 30
+
+  live_delete:
+    name: Live Deletion
+    needs: delete_preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: webflow-cms-production
+    concurrency:
+      group: webflow-cms-cli-live-delete
+      cancel-in-progress: false
+      queue: max
+    if: ${{ inputs.action == 'delete' && inputs.live }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup NodeJS
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Perform live deletion
+        env:
+          WEBFLOW_TOKEN: ${{ secrets.WEBFLOW_TOKEN }}
+          SITE: ${{ inputs.site }}
+          COLLECTION: ${{ inputs.collection }}
+          ITEMS: ${{ inputs.items }}
+          LOCALE_MODE: ${{ inputs.locale_mode }}
+          LOCALE_TAGS: ${{ inputs.locale_tags }}
+        run: |
+          cmd=(
+            node webflow-cms.js
+            delete
+            --site "$SITE"
+            --collection "$COLLECTION"
+            --items "$ITEMS"
+          )
+
+          if [[ "$LOCALE_MODE" == "keep" ]]; then
+            cmd+=(--keep "$LOCALE_TAGS")
+          else
+            cmd+=(--locales "$LOCALE_TAGS")
+          fi
+
+          cmd+=(--live --yes)
+
+          printf 'Running live command:'
+          printf ' %q' "${cmd[@]}"
+          printf '\n'
+
+          "${cmd[@]}"
+
+      - name: Verify resulting locale status
+        if: ${{ !cancelled() }}
+        env:
+          WEBFLOW_TOKEN: ${{ secrets.WEBFLOW_TOKEN }}
+          SITE: ${{ inputs.site }}
+          COLLECTION: ${{ inputs.collection }}
+          ITEMS: ${{ inputs.items }}
+        run: |
+          node webflow-cms.js status \
+            --site "$SITE" \
+            --collection "$COLLECTION" \
+            --items "$ITEMS"
+
+      - name: Upload backups and audit logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: webflow-cms-backup-${{ github.run_id }}
           path: |
             backups/
             logs/
