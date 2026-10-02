@@ -1,4 +1,4 @@
-name: Webflow CMS CLI
+name: Webflow CMS - Prune Locale Variants
 
 on:
   workflow_dispatch:
